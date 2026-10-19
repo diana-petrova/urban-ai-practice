@@ -13,7 +13,6 @@
 """
 import json
 import math
-from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
@@ -25,6 +24,7 @@ BASE = Path(__file__).resolve().parent
 DATA = BASE / "data" / "ivangorod"
 OUT = BASE / "ivangorod_dashboard.html"
 CRS_METRIC = 32635  # UTM 35N — для площадей в метрах
+DATA_DATE = "16.10.2026"  # фактическая дата загрузки данных OpenStreetMap
 
 
 def fnum(x):
@@ -150,7 +150,7 @@ med5 = int(round(med_pair / 5.0) * 5)
 
 n_blocks = len(blocks)
 n_schools = len(schools)
-today = date.today().strftime("%d.%m.%Y")
+data_date = DATA_DATE  # фактическая дата загрузки данных, а не дата запуска скрипта
 
 
 def sp(x):
@@ -161,7 +161,7 @@ def sp(x):
 # ---------- 5. Тексты панели ----------
 summary = (
     '<div class="cards">'
-    f'<div class="card"><div class="card-v">{sp(pop_sum)}</div><div class="card-l">человек живёт</div></div>'
+    f'<div class="card"><div class="card-v">{sp(pop_sum)}</div><div class="card-l">человек живёт (оценка)</div></div>'
     f'<div class="card"><div class="card-v">{n_blocks}</div><div class="card-l">кварталов</div></div>'
     f'<div class="card"><div class="card-v">{round(prov_overall * 100)}%</div>'
     '<div class="card-l">потребности в школах закрыто в пределах нормы</div></div>'
@@ -174,7 +174,7 @@ summary = (
     f'<span class="chip chip-none">нулевая — {zero}</span>'
     "</div>"
     f'<div class="legnote">Обеспеченность школами по {n_res} жилым кварталам; '
-    f"школ в городе — {n_schools}, вместимость {sp(cap_sum)} мест.</div>"
+    f"школ в городе — {n_schools}, вместимость {sp(cap_sum)} мест (оценка).</div>"
 )
 
 notes = (
@@ -184,9 +184,126 @@ notes = (
     f"<p>* Средняя доступность взвешена по площади всех кварталов — включая леса и поля вокруг города "
     f"(общая территория {municip_km2:.0f} км²). Поэтому значение высокое: "
     f"медианный пеший маршрут «квартал → квартал» — около {med5} минут.</p>"
-    f"<p>Данные: OpenStreetMap ({today}); расчёт: BlocksNet 1.0.0a9, ходьба 5 км/ч. "
-    f"Школы (по OSM): {n_schools} шт., вместимость {sp(cap_sum)} мест, потребность {sp(dem_sum)} мест.</p>"
+    f"<p>Данные: OpenStreetMap (загрузка {data_date}); расчёт: BlocksNet 1.0.0a9, ходьба 5 км/ч. "
+    f"Школы (по OSM): {n_schools} шт.; вместимость {sp(cap_sum)} мест (оценка), потребность {sp(dem_sum)} мест (оценка).</p>"
 )
+
+# ---------- 5б. Диаграммы (только по сохранённым файлам) ----------
+def nice_edges(vmax, steps=(0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0)):
+    """Подбирает «круглый» шаг так, чтобы от 0 до vmax вышло 3–6 интервалов."""
+    if vmax is None or not np.isfinite(vmax) or vmax <= 0:
+        return [0.0, 1.0]
+    for step in steps:
+        if vmax / step <= 5.5:
+            return [round(step * i, 6) for i in range(int(np.ceil(vmax / step)) + 1)]
+    step = steps[-1]
+    return [round(step * i, 6) for i in range(int(np.ceil(vmax / step)) + 1)]
+
+
+def fmt_dec(x):
+    """0.2 -> «0,2»; 1.0 -> «1» (по-русски, без лишних нулей)."""
+    s = f"{x:.2f}".rstrip("0").rstrip(".")
+    return s.replace(".", ",")
+
+
+def fmt_area(x):
+    """5387.3 -> «5 387,3»."""
+    return f"{x:,.1f}".replace(",", " ").replace(".", ",")
+
+
+def chart_rows(labels, counts, display, label_w=54):
+    vmax = max(counts) if counts else 1
+    out = []
+    for lab, c, disp in zip(labels, counts, display):
+        w = (float(c) / float(vmax) * 100.0) if vmax else 0.0
+        out.append(
+            '<div class="bar-row">'
+            f'<span class="bar-lab" style="flex:0 0 {label_w}px;width:{label_w}px">{lab}</span>'
+            f'<div class="bar-track"><div class="bar-fill" style="width:{w:.1f}%"></div></div>'
+            f'<span class="bar-val">{disp}</span>'
+            "</div>"
+        )
+    return "".join(out)
+
+
+def chart_block(title, subtitle, labels, counts, display, label_w=54):
+    return (
+        '<div class="chart">'
+        f'<div class="chart-title">{title}</div>'
+        f'<div class="chart-sub">{subtitle}</div>'
+        + chart_rows(labels, counts, display, label_w)
+        + "</div>"
+    )
+
+
+# 1. Обеспеченность школами: сколько кварталов попало в каждый интервал
+prov_pct = (blocks.loc[blocks["demand"].fillna(0) > 0, "provision_strong"] * 100).dropna()
+prov_counts = [
+    int(((prov_pct >= lo) & (prov_pct < hi)).sum())
+    for lo, hi in [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100.0001)]
+]
+prov_labels = ["0–20%", "20–40%", "40–60%", "60–80%", "80–100%"]
+chart_prov = chart_block(
+    "Обеспеченность школами",
+    f"число кварталов в интервале (n = {len(prov_pct)} жилых); "
+    "шкала — % закрытой потребности; оценка по населению и вместимости",
+    prov_labels,
+    prov_counts,
+    [str(c) for c in prov_counts],
+)
+
+# 2. Застройка: FSI (м²/м²) и GSI (% площади квартала)
+dev = blocks[blocks["density_fsi"].fillna(0) > 0]
+fsi_vals = dev["density_fsi"].astype(float).to_numpy()
+fsi_edges = nice_edges(float(fsi_vals.max()) if len(fsi_vals) else 0.0)
+fsi_counts = np.histogram(fsi_vals, bins=fsi_edges)[0].tolist()
+fsi_labels = [f"{fmt_dec(fsi_edges[i])}–{fmt_dec(fsi_edges[i + 1])}" for i in range(len(fsi_edges) - 1)]
+gsi_pct = (dev["density_gsi"].astype(float) * 100).to_numpy()
+gsi_edges = nice_edges(float(gsi_pct.max()) if len(gsi_pct) else 0.0, steps=(1, 2, 5, 10, 20, 25, 50))
+gsi_counts = np.histogram(gsi_pct, bins=gsi_edges)[0].tolist()
+gsi_labels = [f"{fmt_dec(gsi_edges[i])}–{fmt_dec(gsi_edges[i + 1])}" for i in range(len(gsi_edges) - 1)]
+chart_build = (
+    '<div class="chart">'
+    '<div class="chart-title">Плотность застройки (FSI) и застроенность (GSI)</div>'
+    f'<div class="chart-sub">число кварталов в интервале (n = {len(dev)} со зданиями)</div>'
+    '<div class="chart-group">FSI, м²/м²</div>'
+    + chart_rows(fsi_labels, fsi_counts, [str(c) for c in fsi_counts])
+    + '<div class="chart-group">GSI, % площади квартала</div>'
+    + chart_rows(gsi_labels, gsi_counts, [str(c) for c in gsi_counts])
+    + "</div>"
+)
+
+# 3. Землепользование: площадь кварталов по типам
+LAND_RU = {
+    "LandUse.RESIDENTIAL": "Жилая",
+    "LandUse.RECREATION": "Рекреационная",
+    "LandUse.INDUSTRIAL": "Промышленная",
+    "LandUse.BUSINESS": "Деловая",
+    "LandUse.SPECIAL": "Специальная",
+    "LandUse.AGRICULTURE": "Сельхоз",
+    "LandUse.TRANSPORT": "Транспортная",
+}
+land_ru = blocks["land_use"].map(
+    lambda v: LAND_RU.get(v, "Не определена") if isinstance(v, str) else "Не определена"
+)
+land_areas = (blocks.groupby(land_ru)["density_site_area"].sum() / 1e4).sort_values(ascending=False)
+land_total = float(land_areas.sum())
+land_values = [float(v) for v in land_areas.values]
+land_display = [
+    f"{fmt_area(v)} га ({v / land_total * 100:.0f}%)" if land_total else "—"
+    for v in land_values
+]
+chart_land = chart_block(
+    "Землепользование кварталов",
+    f"площадь кварталов по типу, га; всего {fmt_area(land_total)} га "
+    f"({f'{land_total / 100:.1f}'.replace('.', ',')} км²)",
+    list(land_areas.index),
+    land_values,
+    land_display,
+    label_w=88,
+)
+
+charts_html = chart_prov + chart_build + chart_land
 
 # ---------- 6. Данные и шаблон страницы ----------
 data = {
@@ -245,6 +362,17 @@ TPL = """<!DOCTYPE html>
   table.pt { width: 100%; border-collapse: collapse; font-size: 10.5px; }
   table.pt th, table.pt td { padding: 3px 4px; border-bottom: 1px solid #f0f0f0; text-align: right; white-space: nowrap; }
   table.pt th { position: sticky; top: 0; background: #fafafa; font-weight: 600; }
+  .chart { margin-top: 14px; }
+  .chart-title { font-size: 13.5px; font-weight: 600; color: #333; }
+  .chart-sub { font-size: 11px; color: #888; margin: 2px 0 6px; line-height: 1.35; }
+  .chart-group { font-size: 11px; font-weight: 600; color: #555; margin: 8px 0 3px; }
+  .bar-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 11px; }
+  .bar-lab { color: #555; text-align: right; }
+  .bar-track { flex: 1 1 auto; background: #f1f1ee; border-radius: 3px; height: 14px; overflow: hidden; }
+  .bar-fill { height: 100%; background: #fd8d3c; border-radius: 3px; }
+  .bar-val { flex: 0 0 auto; min-width: 44px; color: #333; text-align: right; white-space: nowrap; }
+  .chart-note { font-size: 11px; color: #999; margin-top: 5px; }
+  .chart-src { font-size: 11px; color: #999; margin-top: 9px; line-height: 1.4; }
   @media (max-width: 850px) {
     #panel { width: 100%; bottom: auto; max-height: 52%; }
     #map { top: 52%; }
@@ -255,7 +383,7 @@ TPL = """<!DOCTYPE html>
 <div id="map"></div>
 <div id="panel">
   <h1>Ивангород</h1>
-  <div class="sub">Анализ городской среды · BlocksNet 1.0.0a9 · данные OpenStreetMap</div>
+  <div class="sub">Анализ городской среды · BlocksNet 1.0.0a9 · данные OpenStreetMap (__DATA_DATE__)</div>
 
   <div class="sec-title">Показатель на карте</div>
   <div id="metric-list"></div>
@@ -273,9 +401,15 @@ TPL = """<!DOCTYPE html>
   <div class="sec-title">Таблица показателей</div>
   <button id="btn_table" class="btn">Показать / скрыть таблицу</button>
   <div id="table-box"></div>
+  <div class="chart-note">Население и вместимость школ — оценки по данным OpenStreetMap.</div>
 
   <div class="sec-title">Город в цифрах</div>
   __SUMMARY__
+
+  <div class="sec-title">Графики</div>
+  __CHARTS__
+  <div class="chart-src">Источник: сохранённые результаты BlocksNet 1.0.0a9 (examples/data/ivangorod); данные OpenStreetMap от __DATA_DATE__.</div>
+
   <div class="notes">__NOTES__</div>
 </div>
 
@@ -439,7 +573,7 @@ function popupHtml(p){
   const prov = p.prov == null ? '—' : Math.round(p.prov * 100) + '%';
   const acc = p.access == null ? '—' : p.access.toFixed(1) + ' мин';
   let html = '<div class="pop"><div class="pop-title">Квартал № ' + p.id + '</div>';
-  html += row('Население', p.population ? fmtInt(p.population) + ' чел.' : '0 чел.');
+  html += row('Население (оценка)', p.population ? fmtInt(p.population) + ' чел.' : '0 чел.');
   html += row('Площадь', p.area_ha.toFixed(1) + ' га');
   if (p.population > 0) html += row('Плотность населения', p.pop_density.toFixed(1) + ' чел./га');
   if (p.fsi) {
@@ -476,7 +610,7 @@ function popupHtml(p){
     if (p.dwithout > 0) html += row('Закрыто дальше 15 минут', fmtInt(p.dwithout) + ' мест');
   }
   html += row('Доступность территории', acc);
-  if (p.capacity > 0) html += row('Школы в квартале', fmtInt(p.capacity) + ' мест');
+  if (p.capacity > 0) html += row('Школы в квартале (оценка)', fmtInt(p.capacity) + ' мест');
   if (p.flows_out && p.flows_out.length) html += row('Ученики (по расчёту)', p.flows_out.map(function(f){ return '→ квартал ' + f[0] + ': ' + fmtInt(f[1]) + ' мест'; }).join('; '));
   if (p.flows_in && p.flows_in.length) html += row('Принимает учеников', p.flows_in.map(function(f){ return 'из квартала ' + f[0] + ': ' + fmtInt(f[1]) + ' мест'; }).join('; '));
   html += '</div>';
@@ -629,8 +763,10 @@ renderLegend();
 html = (
     TPL.replace("__DATA_JSON__", data_json)
     .replace("__SUMMARY__", summary)
+    .replace("__CHARTS__", charts_html)
     .replace("__NOTES__", notes)
     .replace("__N_SCHOOLS__", str(n_schools))
+    .replace("__DATA_DATE__", DATA_DATE)
 )
 OUT.write_text(html, encoding="utf-8")
 
