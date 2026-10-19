@@ -42,3 +42,6 @@ ENV/
 
 # PyCharm env
 .idea
+
+# OSM download cache (temporary)
+examples/cache/
